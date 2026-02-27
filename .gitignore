@@ -433,3 +433,7 @@ dist/
 
 release/
 /release
+/Oxdaed.Agent.Installer/agent-0.1.1.4.zip
+/Oxdaed.Agent.Installer/agent-0.1.1.5.zip
+/Oxdaed.Agent.Installer/Oxdaed.Agent.Service.exe
+/Oxdaed.Agent.Installer/Oxdaed.Agent.Updater.exe
