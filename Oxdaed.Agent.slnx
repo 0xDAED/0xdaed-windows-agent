@@ -1,0 +1,6 @@
+<Solution>
+  <Project Path="Oxdaed.Agent.Core/Oxdaed.Agent.Core.csproj" />
+  <Project Path="Oxdaed.Agent.Installer/Installer.csproj" />
+  <Project Path="Oxdaed.Agent.Service/Oxdaed.Agent.Service.csproj" />
+  <Project Path="Oxdaed.Agent.Updater/Oxdaed.Agent.Updater.csproj" />
+</Solution>

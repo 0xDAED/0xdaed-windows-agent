@@ -1,0 +1,30 @@
+﻿<Project Sdk="Microsoft.NET.Sdk.Worker">
+
+  <PropertyGroup>
+	<Version>0.1.1</Version>
+    <TargetFramework>net10.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <UserSecretsId>dotnet-Oxdaed.Agent.Service-4e5ec228-ff4d-470f-9005-460675abff4d</UserSecretsId>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Microsoft.Extensions.Hosting" Version="10.0.2" />
+    <PackageReference Include="Microsoft.Extensions.Hosting.WindowsServices" Version="10.0.2" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\Oxdaed.Agent.Core\Oxdaed.Agent.Core.csproj" />
+	<ProjectReference Include="..\Oxdaed.Agent.Updater\Oxdaed.Agent.Updater.csproj" />
+  </ItemGroup>
+
+<Target Name="CopyUpdaterToOutput" AfterTargets="Build">
+	<PropertyGroup>
+		<UpdaterExe>..\Oxdaed.Agent.Updater\bin\$(Configuration)\net10.0-windows\Oxdaed.Agent.Updater.exe</UpdaterExe>
+		<UpdaterExeAlt>..\Oxdaed.Agent.Updater\bin\$(Configuration)\net10.0\Oxdaed.Agent.Updater.exe</UpdaterExeAlt>
+	</PropertyGroup>
+
+	<Copy SourceFiles="$(UpdaterExe)" DestinationFolder="$(TargetDir)" SkipUnchangedFiles="true" Condition="Exists('$(UpdaterExe)')" />
+	<Copy SourceFiles="$(UpdaterExeAlt)" DestinationFolder="$(TargetDir)" SkipUnchangedFiles="true" Condition="Exists('$(UpdaterExeAlt)')" />
+</Target>
+</Project>
