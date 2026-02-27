@@ -34,9 +34,20 @@ public sealed class CommandDispatcher
                     return await CommandHandlers.KillProcessAsync(pid);
                 }
 
+            case "BLOCK_PROCESS_NAME":
+                {
+                    var name = GetString(payload, "name") ?? "";
+                    return await CommandHandlers.BlockProcessNameAsync(name, ct);
+                }
+
+            case "UNBLOCK_PROCESS_NAME":
+                {
+                    var name = GetString(payload, "name") ?? "";
+                    return await CommandHandlers.UnblockProcessNameAsync(name, ct);
+                }
+
             // request processes НЕ должен “просто вернуть текст”
             // правильнее: агент отправляет /agent/processes (у тебя это и так отдельным циклом идёт)
-            // поэтому тут можно считать "ok"
             case "REQUEST_PROCESSES":
                 return CommandResult.Success(0, "Process refresh will be sent by processes loop");
 
@@ -56,6 +67,7 @@ public sealed class CommandDispatcher
             JsonValueKind.Number => v.ToString(),
             JsonValueKind.True => "true",
             JsonValueKind.False => "false",
+            JsonValueKind.Null => null,
             _ => v.ToString()
         };
     }
@@ -70,7 +82,8 @@ public sealed class CommandDispatcher
             if (v.ValueKind == JsonValueKind.Number && v.TryGetInt32(out var i)) return i;
             if (v.ValueKind == JsonValueKind.String && int.TryParse(v.GetString(), out var j)) return j;
         }
-        catch { }
+        catch { /* ignore */ }
+
         return null;
     }
 }

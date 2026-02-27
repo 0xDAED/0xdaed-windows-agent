@@ -1,4 +1,5 @@
-﻿using System.Diagnostics;
+﻿using Oxdaed.Agent.Core;
+using System.Diagnostics;
 
 namespace Oxdaed.Agent.SystemInfo;
 
@@ -12,11 +13,13 @@ public static class ProcessSnapshot
         {
             try
             {
+                var nameExe = p.ProcessName + ".exe";
                 list.Add(new Dictionary<string, object?>
                 {
                     ["pid"] = p.Id,
                     ["name"] = p.ProcessName + ".exe",
-                    ["working_set"] = p.WorkingSet64
+                    ["working_set"] = p.WorkingSet64,
+                    ["blocked"] = CommandHandlers.IsBlocked(nameExe),
                 });
                 if (list.Count >= limit) break;
             }

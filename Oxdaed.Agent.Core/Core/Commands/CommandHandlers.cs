@@ -1,11 +1,202 @@
 ﻿using System.Diagnostics;
 using System.Text;
-using System.Text.RegularExpressions;
+using System.Text.Json;
 
 namespace Oxdaed.Agent.Core;
 
 public static class CommandHandlers
 {
+    // ====== Block policy storage ======
+    private static readonly string PolicyDir =
+        Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData), "Oxdaed");
+
+    private static readonly string BlockedFile =
+        Path.Combine(PolicyDir, "blocked-processes.json");
+
+    private static readonly SemaphoreSlim BlockedLock = new(1, 1);
+    private static HashSet<string>? _blockedCache;
+
+    // Не даём блокировать критические/system процессы
+    private static readonly HashSet<string> ProtectedNames = new(StringComparer.OrdinalIgnoreCase)
+    {
+        "csrss", "wininit", "winlogon", "services", "lsass", "smss",
+        "svchost", "system", "idle", "registry"
+    };
+
+    // ⚠️ Рекомендую: allowlist вынести в конфиг.
+    // Если хочешь “можно блокировать всё” — просто очисти список и условие ниже убери.
+    private static readonly HashSet<string> AllowedToBlock = new(StringComparer.OrdinalIgnoreCase)
+    {
+        // пример-заглушка, лучше из конфига
+        // "chrome", "discord", "steam"
+    };
+
+    private static string NormalizeProcName(string name)
+    {
+        name = (name ?? "").Trim();
+
+        if (name.EndsWith(".exe", StringComparison.OrdinalIgnoreCase))
+            name = name[..^4];
+
+        return name.ToLowerInvariant();
+    }
+
+    private static bool CanBeBlocked(string normalizedName)
+    {
+        if (string.IsNullOrWhiteSpace(normalizedName)) return false;
+        if (ProtectedNames.Contains(normalizedName)) return false;
+
+        // если allowlist задан — блокируем только разрешённое
+        if (AllowedToBlock.Count > 0 && !AllowedToBlock.Contains(normalizedName))
+            return false;
+
+        return true;
+    }
+
+    private static async Task<HashSet<string>> LoadBlockedAsync(CancellationToken ct)
+    {
+        Directory.CreateDirectory(PolicyDir);
+
+        if (_blockedCache != null)
+            return _blockedCache;
+
+        if (!File.Exists(BlockedFile))
+            return _blockedCache = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+
+        var json = await File.ReadAllTextAsync(BlockedFile, ct);
+        var arr = JsonSerializer.Deserialize<string[]>(json) ?? Array.Empty<string>();
+
+        _blockedCache = new HashSet<string>(
+            arr.Select(NormalizeProcName).Where(s => !string.IsNullOrWhiteSpace(s)),
+            StringComparer.OrdinalIgnoreCase
+        );
+
+        return _blockedCache;
+    }
+
+    private static async Task SaveBlockedAsync(HashSet<string> set, CancellationToken ct)
+    {
+        Directory.CreateDirectory(PolicyDir);
+
+        var arr = set
+            .Select(NormalizeProcName)
+            .Where(s => !string.IsNullOrWhiteSpace(s))
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .OrderBy(x => x)
+            .ToArray();
+
+        var json = JsonSerializer.Serialize(arr, new JsonSerializerOptions { WriteIndented = true });
+        await File.WriteAllTextAsync(BlockedFile, json, ct);
+    }
+
+    // ====== Public API for snapshot/UI ======
+    public static bool IsBlocked(string processName)
+    {
+        try
+        {
+            var n = NormalizeProcName(processName);
+            return _blockedCache != null && _blockedCache.Contains(n);
+        }
+        catch { return false; }
+    }
+
+    public static async Task WarmupBlockedCacheAsync(CancellationToken ct)
+    {
+        await BlockedLock.WaitAsync(ct);
+        try { _ = await LoadBlockedAsync(ct); }
+        finally { BlockedLock.Release(); }
+    }
+
+    // ====== Commands: block/unblock ======
+    public static async Task<CommandResult> BlockProcessNameAsync(string name, CancellationToken ct)
+    {
+        var n = NormalizeProcName(name);
+
+        if (!CanBeBlocked(n))
+            return CommandResult.Fail(1, null, $"Blocking is not allowed for: {name}");
+
+        await BlockedLock.WaitAsync(ct);
+        try
+        {
+            var set = await LoadBlockedAsync(ct);
+            set.Add(n);
+            await SaveBlockedAsync(set, ct);
+            return CommandResult.Success(0, $"Blocked process name: {n}");
+        }
+        catch (Exception ex)
+        {
+            return CommandResult.Fail(1, null, ex.Message);
+        }
+        finally
+        {
+            BlockedLock.Release();
+        }
+    }
+
+    public static async Task<CommandResult> UnblockProcessNameAsync(string name, CancellationToken ct)
+    {
+        var n = NormalizeProcName(name);
+
+        await BlockedLock.WaitAsync(ct);
+        try
+        {
+            var set = await LoadBlockedAsync(ct);
+            var removed = set.Remove(n);
+            await SaveBlockedAsync(set, ct);
+            return CommandResult.Success(0, removed ? $"Unblocked: {n}" : $"Was not blocked: {n}");
+        }
+        catch (Exception ex)
+        {
+            return CommandResult.Fail(1, null, ex.Message);
+        }
+        finally
+        {
+            BlockedLock.Release();
+        }
+    }
+
+    // ====== Enforcement: kill blocked processes in loop ======
+    public static async Task EnforceBlockedProcessesAsync(CancellationToken ct)
+    {
+        HashSet<string> blocked;
+
+        await BlockedLock.WaitAsync(ct);
+        try
+        {
+            blocked = new HashSet<string>(await LoadBlockedAsync(ct), StringComparer.OrdinalIgnoreCase);
+        }
+        finally
+        {
+            BlockedLock.Release();
+        }
+
+        if (blocked.Count == 0) return;
+
+        foreach (var p in Process.GetProcesses())
+        {
+            ct.ThrowIfCancellationRequested();
+
+            try
+            {
+                var pname = NormalizeProcName(p.ProcessName);
+
+                if (!blocked.Contains(pname)) continue;
+                if (ProtectedNames.Contains(pname)) continue;
+
+                p.Kill(entireProcessTree: true);
+            }
+            catch
+            {
+                // ignore: access denied / already exited / protected process
+            }
+            finally
+            {
+                try { p.Dispose(); } catch { }
+            }
+        }
+    }
+
+    // ====== Existing commands ======
     public static async Task<CommandResult> RunShellPowerShellAsync(string script, int timeoutSec, CancellationToken ct)
     {
         Console.WriteLine(script);
@@ -97,7 +288,7 @@ public static class CommandHandlers
         {
             if (pid <= 0) return Task.FromResult(CommandResult.Fail(1, null, "Invalid pid"));
 
-            var p = Process.GetProcessById(pid);
+            using var p = Process.GetProcessById(pid);
             p.Kill(entireProcessTree: true);
             return Task.FromResult(CommandResult.Success(0, $"Killed pid={pid}"));
         }
@@ -120,9 +311,7 @@ public static class CommandHandlers
 
     private static string WrapPsCommand(string s)
     {
-        // wraps into "...." and escapes quotes for PowerShell parsing
-        // replace " with `"
-        var esc = s.Replace("\"", "`\"");
+        var esc = (s ?? "").Replace("\"", "`\"");
         return "\"" + esc + "\"";
     }
 }

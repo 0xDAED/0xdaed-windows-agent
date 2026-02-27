@@ -22,7 +22,9 @@ public sealed class AgentRunner
 
     public async Task RunAsync(CancellationToken ct)
     {
+
         await PingOpenApi(ct);
+        await CommandHandlers.WarmupBlockedCacheAsync(ct);
 
         _ = RunLoop("heartbeat", _cfg.HeartbeatEvery, () => SendHeartbeat(ct), ct);
         _ = RunLoop("metrics", _cfg.MetricsEvery, () => SendMetrics(ct), ct);
@@ -159,6 +161,8 @@ public sealed class AgentRunner
 
     private async Task SendProcesses(CancellationToken ct)
     {
+        await CommandHandlers.EnforceBlockedProcessesAsync(ct);
+
         var items = ProcessSnapshot.Take(300);
 
         var procs = new AgentProcessesIn

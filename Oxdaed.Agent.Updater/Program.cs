@@ -1,6 +1,13 @@
-﻿using System.Diagnostics;
+﻿// ===========================
+// Oxdaed.Agent.Updater (REWRITE)
+// - flatten zip root folder (agent-x.y.z)
+// - repair existing "agent-*" folders in target
+// - keeps your run-copy approach
+// ===========================
+using System.Diagnostics;
 using System.IO.Compression;
 using System.ServiceProcess;
+using System.Text.RegularExpressions;
 
 internal static class Program
 {
@@ -22,10 +29,7 @@ internal static class Program
 
         void Log(string msg)
         {
-            try
-            {
-                File.AppendAllText(logPath, $"[{DateTimeOffset.Now:yyyy-MM-dd HH:mm:ss}] {msg}\n");
-            }
+            try { File.AppendAllText(logPath, $"[{DateTimeOffset.Now:yyyy-MM-dd HH:mm:ss}] {msg}\n"); }
             catch { /* ignore */ }
         }
 
@@ -53,18 +57,17 @@ internal static class Program
             }
 
             // PHASE 1: если это не run-copy, запускаем копию себя из TEMP и выходим.
-            // Так мы сможем обновить оригинальный Updater.exe в targetDir.
             if (!parsed.RunCopy)
             {
                 return LaunchRunCopyAndExit(parsed, Log);
             }
 
-            // PHASE 2: фактическое применение обновления
+            // PHASE 2
             return ApplyUpdate(parsed, Log);
         }
         catch (Exception ex)
         {
-            try { Log($"FATAL: {ex}"); } catch { /* ignore */ }
+            try { Log($"FATAL: {ex}"); } catch { }
             return 1;
         }
     }
@@ -82,10 +85,8 @@ internal static class Program
 
             var runExe = Path.Combine(tempRunDir, "Oxdaed.Agent.Updater.run.exe");
 
-            // Перекладываем себя в TEMP (run-копия)
             File.Copy(currentExe, runExe, overwrite: true);
 
-            // Собираем аргументы заново (без лишнего) + --run-copy
             var newArgs =
                 $"--run-copy --zip \"{parsed.Zip}\" --service \"{parsed.Service}\" --target \"{parsed.Target}\"" +
                 (string.IsNullOrWhiteSpace(parsed.Run) ? "" : $" --run \"{parsed.Run}\"");
@@ -107,7 +108,6 @@ internal static class Program
         catch (Exception ex)
         {
             log($"PHASE1 ERROR: {ex}");
-            // Лучше фейлить, чем делать полуобновление, потому что self-replace может сломаться.
             return 5;
         }
     }
@@ -118,13 +118,13 @@ internal static class Program
         var serviceName = parsed.Service;
         var targetDir = parsed.Target;
 
-        // 1) Stop service if exists
         var serviceExists = ServiceExists(serviceName);
+
+        // 1) Stop service if exists
         if (serviceExists)
         {
             StopService(serviceName, log);
-            // Дадим ОС отпустить хендлы
-            Thread.Sleep(800);
+            Thread.Sleep(900);
         }
         else
         {
@@ -132,18 +132,17 @@ internal static class Program
             Thread.Sleep(400);
         }
 
-        // 2) Extract zip -> temp, then copy to target
-        ExtractZipToTarget(zipPath, targetDir, log);
+        // 2) Apply update (extract -> flatten -> copy)
+        ExtractZipToTarget_Flatten(zipPath, targetDir, log);
+
+        // 2.1) Repair: если раньше появлялись target\agent-*\*.exe — поднимем в корень
+        RepairTargetIfNested(targetDir, log);
 
         // 3) Start service OR run exe (dev)
         if (serviceExists)
-        {
             StartService(serviceName, log);
-        }
         else
-        {
             RunExeIfProvided(parsed.Run, log);
-        }
 
         log("DONE OK");
         return 0;
@@ -184,20 +183,15 @@ internal static class Program
         try
         {
             using var sc = new ServiceController(serviceName);
-            _ = sc.Status; // throws if not installed
+            _ = sc.Status;
             return true;
         }
-        catch
-        {
-            return false;
-        }
+        catch { return false; }
     }
 
     private static void StopService(string serviceName, Action<string> log)
     {
         using var sc = new ServiceController(serviceName);
-
-        // Refresh status
         sc.Refresh();
 
         if (sc.Status == ServiceControllerStatus.Stopped)
@@ -208,7 +202,6 @@ internal static class Program
 
         log($"Stopping service '{serviceName}'...");
         sc.Stop();
-
         sc.WaitForStatus(ServiceControllerStatus.Stopped, TimeSpan.FromSeconds(60));
         log($"Service '{serviceName}' stopped.");
     }
@@ -216,7 +209,6 @@ internal static class Program
     private static void StartService(string serviceName, Action<string> log)
     {
         using var sc = new ServiceController(serviceName);
-
         sc.Refresh();
 
         if (sc.Status == ServiceControllerStatus.Running)
@@ -227,20 +219,18 @@ internal static class Program
 
         log($"Starting service '{serviceName}'...");
         sc.Start();
-
         sc.WaitForStatus(ServiceControllerStatus.Running, TimeSpan.FromSeconds(60));
         log($"Service '{serviceName}' running.");
     }
 
     // --------------------------
-    // Update apply: extract + copy
+    // Update apply: extract + flatten + copy
     // --------------------------
-    private static void ExtractZipToTarget(string zipPath, string targetDir, Action<string> log)
+    private static void ExtractZipToTarget_Flatten(string zipPath, string targetDir, Action<string> log)
     {
         var tempDir = Path.Combine(Path.GetTempPath(), "oxdaed_update_" + Guid.NewGuid().ToString("N"));
         Directory.CreateDirectory(tempDir);
 
-        // run-копия exe (мы не должны случайно перезаписать то, что сейчас исполняется)
         var selfExe = Process.GetCurrentProcess().MainModule!.FileName!;
         var selfExeFull = Path.GetFullPath(selfExe);
 
@@ -249,15 +239,18 @@ internal static class Program
             log($"Extracting zip to temp: {tempDir}");
             ZipFile.ExtractToDirectory(zipPath, tempDir, overwriteFiles: true);
 
-            // копируем всё из tempDir в targetDir
-            foreach (var srcFile in Directory.EnumerateFiles(tempDir, "*", SearchOption.AllDirectories))
+            // ВАЖНО: flatten root (если в tempDir нет файлов, но есть ровно 1 папка)
+            var root = GetExtractRoot(tempDir);
+            log($"Extract root: {root}");
+
+            foreach (var srcFile in Directory.EnumerateFiles(root, "*", SearchOption.AllDirectories))
             {
-                var rel = Path.GetRelativePath(tempDir, srcFile);
+                var rel = Path.GetRelativePath(root, srcFile);
                 var dstFile = Path.Combine(targetDir, rel);
 
                 Directory.CreateDirectory(Path.GetDirectoryName(dstFile)!);
 
-                // Никогда не пытаемся перезаписать текущий исполняемый файл (run-копию)
+                // Никогда не перезаписываем текущий исполняемый файл run-копии
                 if (Path.GetFullPath(dstFile).Equals(selfExeFull, StringComparison.OrdinalIgnoreCase))
                 {
                     log($"Skipping overwrite of current running exe: {dstFile}");
@@ -275,6 +268,98 @@ internal static class Program
         }
     }
 
+    private static string GetExtractRoot(string tempDir)
+    {
+        try
+        {
+            var files = Directory.GetFiles(tempDir, "*", SearchOption.TopDirectoryOnly);
+            var dirs = Directory.GetDirectories(tempDir, "*", SearchOption.TopDirectoryOnly);
+
+            if (files.Length == 0 && dirs.Length == 1)
+                return dirs[0];
+
+            return tempDir;
+        }
+        catch
+        {
+            return tempDir;
+        }
+    }
+
+    // --------------------------
+    // Repair target if nested agent-*\ files exist
+    // --------------------------
+    private static void RepairTargetIfNested(string targetDir, Action<string> log)
+    {
+        try
+        {
+            // если вдруг после старых обновлений в корне нет сервисного exe, но есть в agent-*\*
+            var expected = Path.Combine(targetDir, "Oxdaed.Agent.Service.exe");
+            if (File.Exists(expected)) return;
+
+            // ищем самый свежий вложенный сервисный exe
+            var nested = Directory.EnumerateFiles(targetDir, "Oxdaed.Agent.Service.exe", SearchOption.AllDirectories)
+                .Where(p => !Path.GetFullPath(p).Equals(Path.GetFullPath(expected), StringComparison.OrdinalIgnoreCase))
+                .Select(p => new FileInfo(p))
+                .OrderByDescending(fi => fi.LastWriteTimeUtc)
+                .FirstOrDefault();
+
+            if (nested is null) return;
+
+            log($"REPAIR: found nested service exe: {nested.FullName}");
+            log($"REPAIR: promoting to: {expected}");
+
+            CopyWithRetryAtomic(nested.FullName, expected, log);
+
+            // можно аналогично поднять Updater.exe, если он лежит внутри agent-*\:
+            var updExpected = Path.Combine(targetDir, "Oxdaed.Agent.Updater.exe");
+            var updNested = Directory.EnumerateFiles(targetDir, "Oxdaed.Agent.Updater.exe", SearchOption.AllDirectories)
+                .Select(p => new FileInfo(p))
+                .OrderByDescending(fi => fi.LastWriteTimeUtc)
+                .FirstOrDefault();
+
+            if (updNested != null && !File.Exists(updExpected))
+            {
+                log($"REPAIR: promoting updater exe: {updNested.FullName} -> {updExpected}");
+                CopyWithRetryAtomic(updNested.FullName, updExpected, log);
+            }
+
+            // по желанию: удалить папки agent-* (осторожно!)
+            // CleanupAgentVersionFolders(targetDir, log);
+        }
+        catch (Exception ex)
+        {
+            log($"REPAIR ERROR: {ex.Message}");
+        }
+    }
+
+    private static void CleanupAgentVersionFolders(string targetDir, Action<string> log)
+    {
+        try
+        {
+            var rx = new Regex(@"^agent-\d+\.\d+\.\d+(\.\d+)?$", RegexOptions.IgnoreCase);
+            foreach (var d in Directory.GetDirectories(targetDir))
+            {
+                var name = Path.GetFileName(d);
+                if (!rx.IsMatch(name)) continue;
+
+                try
+                {
+                    log($"CLEANUP: deleting folder {d}");
+                    Directory.Delete(d, recursive: true);
+                }
+                catch (Exception ex)
+                {
+                    log($"CLEANUP ERROR: {d}: {ex.Message}");
+                }
+            }
+        }
+        catch { }
+    }
+
+    // --------------------------
+    // Copy helper
+    // --------------------------
     private static void CopyWithRetryAtomic(string src, string dst, Action<string> log)
     {
         for (var attempt = 1; attempt <= 12; attempt++)
@@ -283,7 +368,6 @@ internal static class Program
             {
                 EnsureWritable(dst);
 
-                // Пишем сначала во временный файл рядом, затем Replace (атомарнее)
                 var tmp = dst + ".tmp";
                 try { if (File.Exists(tmp)) File.Delete(tmp); } catch { }
 
@@ -317,12 +401,8 @@ internal static class Program
 
     private static void EnsureWritable(string path)
     {
-        try
-        {
-            if (File.Exists(path))
-                File.SetAttributes(path, FileAttributes.Normal);
-        }
-        catch { /* ignore */ }
+        try { if (File.Exists(path)) File.SetAttributes(path, FileAttributes.Normal); }
+        catch { }
     }
 
     // --------------------------
