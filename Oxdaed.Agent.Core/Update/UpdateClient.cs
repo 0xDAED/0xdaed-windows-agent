@@ -37,16 +37,19 @@ public sealed class UpdateClient
             var manifest = await _api.GetJson<UpdateManifest>(manifestUrl, ct);
             if (manifest is null) return;
 
-            var latest = (manifest.latest ?? "").Trim();
             var url = (manifest.url ?? "").Trim();
-            if (string.IsNullOrWhiteSpace(latest) || string.IsNullOrWhiteSpace(url)) return;
 
-            var current = ThisVersion.Value;
+            var current = NormalizeVersion(ThisVersion.Value);
+            var latest = NormalizeVersion(manifest.latest);
+            if (string.IsNullOrWhiteSpace(latest) || string.IsNullOrWhiteSpace(url)) return;
 
             Console.WriteLine($"Update check: current={current} latest={latest}");
 
             if (string.Equals(latest, current, StringComparison.OrdinalIgnoreCase))
+            {
+                Console.WriteLine("Agent already up to date.");
                 return;
+            }
 
             var staging = Path.Combine(
                 Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData),
@@ -155,6 +158,18 @@ public sealed class UpdateClient
 
         throw new IOException($"Failed to write {dst} after retries", last);
     }
+
+    private static string NormalizeVersion(string v)
+    {
+        if (string.IsNullOrWhiteSpace(v))
+            return "";
+
+        var i = v.IndexOf('+');
+        if (i >= 0)
+            v = v.Substring(0, i);
+
+        return v.Trim();
+    }
 }
 
 public sealed class UpdateManifest
@@ -181,3 +196,4 @@ public static class ThisVersion
         }
     }
 }
+

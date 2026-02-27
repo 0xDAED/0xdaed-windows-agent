@@ -298,6 +298,32 @@ public static class CommandHandlers
         }
     }
 
+    public static async Task<CommandResult> GetBlockedListAsync(CancellationToken ct)
+    {
+        await BlockedLock.WaitAsync(ct);
+        try
+        {
+            var set = await LoadBlockedAsync(ct); 
+            var arr = set
+                .Select(x => x.Trim())
+                .Where(x => !string.IsNullOrWhiteSpace(x))
+                .Distinct(StringComparer.OrdinalIgnoreCase)
+                .OrderBy(x => x)
+                .ToArray();
+
+            var json = JsonSerializer.Serialize(arr);
+            return CommandResult.Success(0, json, null);
+        }
+        catch (Exception ex)
+        {
+            return CommandResult.Fail(1, null, ex.Message);
+        }
+        finally
+        {
+            BlockedLock.Release();
+        }
+    }
+
     private static string FindPwshOrPowershell()
     {
         var pwsh = Path.Combine(

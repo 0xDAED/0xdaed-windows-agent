@@ -46,6 +46,9 @@ public sealed class CommandDispatcher
                     return await CommandHandlers.UnblockProcessNameAsync(name, ct);
                 }
 
+            case "GET_BLOCKED_LIST":
+                return await CommandHandlers.GetBlockedListAsync(ct);
+
             // request processes НЕ должен “просто вернуть текст”
             // правильнее: агент отправляет /agent/processes (у тебя это и так отдельным циклом идёт)
             case "REQUEST_PROCESSES":
