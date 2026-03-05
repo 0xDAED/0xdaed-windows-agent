@@ -47,8 +47,8 @@ public static class CommandHandlers
         if (ProtectedNames.Contains(normalizedName)) return false;
 
         // если allowlist задан — блокируем только разрешённое
-        if (AllowedToBlock.Count > 0 && !AllowedToBlock.Contains(normalizedName))
-            return false;
+        //if (AllowedToBlock.Count > 0 && !AllowedToBlock.Contains(normalizedName))
+        //    return false;
 
         return true;
     }
